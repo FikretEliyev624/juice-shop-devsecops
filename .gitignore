@@ -29,7 +29,6 @@ vagrant/.vagrant/
 JSON
 JSON.map
 frontend/src/**/*.js
-/bom.json
 /bom.xml
 
 # IDEs
