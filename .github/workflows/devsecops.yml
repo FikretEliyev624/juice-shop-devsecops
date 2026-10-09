@@ -61,7 +61,7 @@ jobs:
 
       - name: Trivy SBOM scan (hazır bom.json)
         run: |
-          docker run --rm -v "$PWD:/src" aquasec/trivy:latest sbom \
+          docker run --rm -v "$PWD:/src" aquasec/trivy:0.58.1 sbom \
             --severity HIGH,CRITICAL \
             --format sarif --output /src/trivy-sbom.sarif /src/bom.json
 
