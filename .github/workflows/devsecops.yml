@@ -1,0 +1,119 @@
+name: DevSecOps Pipeline
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  security-events: write
+  actions: read
+
+jobs:
+  # ---------- 1. Secret scan ----------
+  secrets:
+    name: Secrets - Gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Gitleaks
+        run: |
+          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:latest \
+            detect --source /repo --redact --exit-code 0 \
+            --report-format sarif --report-path /repo/gitleaks.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: gitleaks.sarif
+          category: gitleaks
+
+  # ---------- 2. SAST ----------
+  sast:
+    name: SAST - Semgrep
+    runs-on: ubuntu-latest
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@v4
+      - name: Semgrep scan
+        run: |
+          semgrep scan \
+            --config p/owasp-top-ten \
+            --config p/typescript \
+            --config p/expressjs \
+            --sarif --output semgrep.sarif
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  # ---------- 3. SCA ----------
+  sca:
+    name: SCA - SBOM + npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Trivy SBOM scan (hazır bom.json)
+        run: |
+          docker run --rm -v "$PWD:/src" aquasec/trivy:latest sbom \
+            --severity HIGH,CRITICAL \
+            --format sarif --output /src/trivy-sbom.sarif /src/bom.json
+
+      - uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-sbom.sarif
+          category: trivy-sbom
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: npm audit
+        run: |
+          npm install --package-lock-only --package-lock=true --ignore-scripts
+          npm audit --json > npm-audit.json || true
+          npm audit --audit-level=critical || echo "Critical zəifliklər var (Juice Shop qəsdən zəifdir)"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sca-reports
+          path: |
+            npm-audit.json
+            trivy-sbom.sarif
+
+  # ---------- 4. DAST ----------
+  dast:
+    name: DAST - ZAP baseline
+    runs-on: ubuntu-latest
+    needs: [secrets, sast, sca]
+    services:
+      juiceshop:
+        image: bkimminich/juice-shop:v20.2.0
+        ports:
+          - 3000:3000
+    steps:
+      - name: Wait for Juice Shop
+        run: |
+          for i in $(seq 1 30); do
+            curl -s http://localhost:3000 > /dev/null && echo "Hazırdır" && exit 0
+            sleep 5
+          done
+          exit 1
+      - name: ZAP baseline
+        run: |
+          mkdir -p zap && chmod 777 zap
+          docker run --rm --network host -v "$PWD/zap:/zap/wrk:rw" zaproxy/zap-stable \
+            zap-baseline.py -t http://localhost:3000 -r zap-report.html -J zap-report.json -I
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: zap-report
+          path: zap/
